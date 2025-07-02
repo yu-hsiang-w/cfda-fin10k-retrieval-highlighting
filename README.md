@@ -1,4 +1,4 @@
-# cfda-fin10k-retrieval-highlighting
+# CFDA Fin10k Retrieval Highlighting
 
 **Retrieval-augmented highlighting system for financial 10-K filings, developed at CFDA Lab.**
 
