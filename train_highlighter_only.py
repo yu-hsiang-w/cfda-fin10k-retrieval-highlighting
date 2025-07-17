@@ -1,22 +1,26 @@
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-from transformers import BertModel, AutoTokenizer, AutoModel, BertForTokenClassification
-import random
-import os
-import json
 import argparse
-import numpy as np
-import pickle
+import json
 import logging
+import os
+import pickle
+import random
 import warnings
-import statistics
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModel, AutoTokenizer, BertForTokenClassification
+
 from fin_rag.train_diff_agg import compute_metrics
 
-# Suppress specific warnings using the warnings module
-warnings.filterwarnings('ignore', message="Some weights of .* were not initialized from the model checkpoint")
+logger = logging.getLogger(__name__)
 
-# Set up logging to suppress all warnings and only show errors
+warnings.filterwarnings(
+    "ignore",
+    message="Some weights of .* were not initialized from the model checkpoint"
+)
+
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 random.seed(42)
@@ -93,30 +97,26 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
     predictions_list = []
     labels_list = []
 
-    # Iterate over all examples in the dataset
     for element in annotated_results:
         query_firm_name = cik_to_name[element[0].split('_')[2]]
         concat_text = f"{query_firm_name} {element[1]}"
         
-        # Embed query text using the retriever
         query_embedding = embed_texts_contriever2(concat_text, retriever, tokenizer1, device)
         query_embedding = F.normalize(query_embedding, p=2, dim=1).to(device)
         
-        # Compute similarities and get top-k indices for retrieval if needed.
         similarities = torch.matmul(all_doc_embeddings, query_embedding.t()).squeeze()
         topk_values, topk_indices = torch.topk(similarities, 2)
         
-        # 1) Tokenize the list of words properly:
         encoded_A = tokenizer2(
-            element[2],              # e.g. ["This","is","a","sentence"]
-            is_split_into_words=True,         # <-- very important
-            add_special_tokens=False,         # we’ll add SEP manually
+            element[2],             
+            is_split_into_words=True,
+            add_special_tokens=False,
             truncation=True,
             max_length=250,
             return_tensors="pt",
         )
 
-        input_ids_A = encoded_A["input_ids"].to(device)         # [1, seq_len_A]
+        input_ids_A = encoded_A["input_ids"].to(device)
         attention_mask_A = encoded_A["attention_mask"].to(device)
 
         raw_labels = [
@@ -124,25 +124,20 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
             for lbl in element[3]
         ]
 
-        # build aligned labels for A
-        word_ids = encoded_A.word_ids(batch_index=0)  # a list of len(seq_len_A)
+        word_ids = encoded_A.word_ids(batch_index=0)
         labels_A = []
         prev_word_idx = None
         for word_idx in word_ids:
             if word_idx is None:
-                # special token or padding
                 labels_A.append(-100)
             elif word_idx != prev_word_idx:
-                # first sub-token of a word → use the true label
                 labels_A.append(raw_labels[word_idx])
             else:
-                # continuation sub-token → ignore
                 labels_A.append(-100)
             prev_word_idx = word_idx
 
         labels_A = torch.tensor(labels_A, dtype=torch.long, device=device).unsqueeze(0)
 
-        # 2) Tokenize the retrieved text B (no special tokens):
         if args.retrieval_method in ['top_1','top_3']:
             text_B = final_texts[
                 topk_indices[1].item()
@@ -154,12 +149,11 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
                 max_length=250,
                 return_tensors="pt",
             )
-            input_ids_B = encoded_B["input_ids"].to(device)       # [1, seq_len_B]
+            input_ids_B = encoded_B["input_ids"].to(device)    
             attention_mask_B   = encoded_B["attention_mask"].to(device)
 
-        # 3) Manually insert one SEP between them (if any):
         sep_id = tokenizer2.sep_token_id
-        sep_tensor = torch.tensor([[sep_id]], device=device)             # [1,1]
+        sep_tensor = torch.tensor([[sep_id]], device=device)         
         mask_sep   = torch.ones_like(sep_tensor)
 
         if args.retrieval_method == 'None':
@@ -174,26 +168,21 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
             pad_labels = [-100] * (1 + b_len)
             labels = torch.cat([labels_A, torch.tensor(pad_labels, device=device).unsqueeze(0)], dim=1)
 
-
-        #forward pass
         with torch.no_grad():
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask)
-        logits = outputs.logits                        # [1, seq_len, 2]
+        logits = outputs.logits                    
 
         sep_index = (input_ids == sep_id).nonzero(as_tuple=True)[1].item()
-        logits = logits[:, :sep_index, :]   # [1, seq_len_A, num_labels]
-        labels = labels[:, :sep_index]      # [1, seq_len_A]
+        logits = logits[:, :sep_index, :] 
+        labels = labels[:, :sep_index]    
 
-        # Store the raw logits and true labels (convert to numpy)
         predictions_list.append(logits.detach().cpu().numpy())
         true_labels = labels.cpu().numpy()
         labels_list.append(true_labels.reshape(1, -1))
     
-    # Pad all predictions and labels so they have the same sequence length
     predictions, labels = pad_and_stack(predictions_list, labels_list, pad_label=-100)
     
-    # Compute metrics using your pre-existing function
     metrics = compute_metrics((predictions, labels))
     return metrics
 
@@ -202,8 +191,6 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
 
 
 def main():
-
-    # Argument parser setup
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--lr', type=float, default=2e-5)
@@ -215,7 +202,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Device configuration
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     cik_to_name = {}
@@ -242,7 +228,6 @@ def main():
                             cik_to_name[cik] = firm_name
                         
     
-    # Load annotated results
     training_annotated_results = []
     if args.training_label == "naive":
         with open('fin_rag/annotation/annotated_result/all/setting2/train.jsonl', 'r') as file:
@@ -370,8 +355,8 @@ def main():
             ]
             expert_annotated_results.append(id_text_label)
 
-    # Load paragraph information
-    with open('para_info/para_info_contriever_firm.pkl', 'rb') as f:
+    # Load paragraph encoding
+    with open('paragraph_encodings/para_info_contriever_firm.pkl', 'rb') as f:
         para_info = pickle.load(f)
 
     # Extract embeddings and texts
@@ -414,8 +399,6 @@ def main():
             count = 0
             for training_element in training_annotated_results:
                 count += 1
-                #if count % 100 == 0:
-                    #print(count)
 
                 query_firm_name = cik_to_name[training_element[0].split('_')[2]]
                 concat_text = f"{query_firm_name} {training_element[1]}"
@@ -424,20 +407,19 @@ def main():
                 query_embedding = embed_texts_contriever2(concat_text, retriever, tokenizer1, device)
                 query_embedding = F.normalize(query_embedding, p=2, dim=1)
                 
-                query_embedding = query_embedding.to(device)  # Shape: (1, embedding_dim)
+                query_embedding = query_embedding.to(device) 
 
                 # Compute similarities (dot product)
-                similarities = torch.matmul(all_doc_embeddings, query_embedding.t()).squeeze()  # Shape: (num_docs,)
+                similarities = torch.matmul(all_doc_embeddings, query_embedding.t()).squeeze()  
 
                 # Retrieve top-k documents
                 topk_values, topk_indices = torch.topk(similarities, 6)
                 
                 # Tokenize training element
-                # 1) Tokenize the list of words properly:
                 encoded_A = tokenizer2(
-                    training_element[2],              # e.g. ["This","is","a","sentence"]
-                    is_split_into_words=True,         # <-- very important
-                    add_special_tokens=False,         # we’ll add SEP manually
+                    training_element[2],             
+                    is_split_into_words=True,        
+                    add_special_tokens=False,         
                     truncation=True,
                     max_length=250,
                     return_tensors="pt",
@@ -451,25 +433,21 @@ def main():
                     for lbl in training_element[3]
                 ]
 
-                # build aligned labels for A
-                word_ids = encoded_A.word_ids(batch_index=0)  # a list of len(seq_len_A)
+                word_ids = encoded_A.word_ids(batch_index=0)  
                 labels_A = []
                 prev_word_idx = None
                 for word_idx in word_ids:
                     if word_idx is None:
-                        # special token or padding
                         labels_A.append(-100)
                     elif word_idx != prev_word_idx:
-                        # first sub-token of a word → use the true label
                         labels_A.append(raw_labels[word_idx])
                     else:
-                        # continuation sub-token → ignore
                         labels_A.append(-100)
                     prev_word_idx = word_idx
 
                 labels_A = torch.tensor(labels_A, dtype=torch.long, device=device).unsqueeze(0)
 
-                # 2) Tokenize the retrieved text B (no special tokens):
+
                 if args.retrieval_method in ['top_1','top_3']:
                     text_B = final_texts[
                         topk_indices[1].item() if args.retrieval_method=='top_1'
@@ -482,12 +460,12 @@ def main():
                         max_length=250,
                         return_tensors="pt",
                     )
-                    input_ids_B = encoded_B["input_ids"].to(device)       # [1, seq_len_B]
+                    input_ids_B = encoded_B["input_ids"].to(device)      
                     attention_mask_B   = encoded_B["attention_mask"].to(device)
 
-                # 3) Manually insert one SEP between them (if any):
+
                 sep_id = tokenizer2.sep_token_id
-                sep_tensor = torch.tensor([[sep_id]], device=device)             # [1,1]
+                sep_tensor = torch.tensor([[sep_id]], device=device)           
                 mask_sep   = torch.ones_like(sep_tensor)
 
                 if args.retrieval_method == 'None':
@@ -496,36 +474,32 @@ def main():
                     labels = labels_A
                 else:
                     input_ids      = torch.cat([input_ids_A, sep_tensor, input_ids_B], dim=1)
-                    attention_mask = torch.cat([attention_mask_A, mask_sep, attention_mask_B],    dim=1)
+                    attention_mask = torch.cat([attention_mask_A, mask_sep, attention_mask_B], dim=1)
 
                     b_len = input_ids_B.size(1)
                     pad_labels = [-100] * (1 + b_len)
                     labels = torch.cat([labels_A, torch.tensor(pad_labels, device=device).unsqueeze(0)], dim=1)
 
 
-                #forward pass
                 outputs = model(input_ids=input_ids,
                                 attention_mask=attention_mask)
-                logits = outputs.logits                        # [1, seq_len, 2]
+                logits = outputs.logits                    
 
                 sep_index = (input_ids == sep_id).nonzero(as_tuple=True)[1].item()
-                logits = logits[:, :sep_index, :]   # [1, seq_len_A, num_labels]
-                labels = labels[:, :sep_index]      # [1, seq_len_A]
+                logits = logits[:, :sep_index, :]  
+                labels = labels[:, :sep_index]    
 
 
-                #compute the loss exactly as BertForTokenClassification does
                 loss = criterion(
                     logits.view(-1, logits.size(-1)),
                     labels.view(-1),
                 )
 
-                # backprop
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
 
-            # At evaluation time (after model training epoch, for example)
             model.eval()
             retriever.eval()
 
@@ -538,15 +512,16 @@ def main():
                 epoch_number = epoch * 3 + k + 1
             else:
                 epoch_number = epoch + k + 1
-            print(f"Train for {epoch_number} epochs:")
-            print("Training Metrics:", training_metrics)
-            print()
-            print("Validation Metrics:", validation_metrics)
-            print()
-            print("Testing Metrics:", testing_metrics)
-            print()
-            print("Expert Metrics:", expert_metrics)
-            print()
+            
+            logger.info("Train for %d epochs:", epoch + 1)
+            logger.info("Training Metrics: %s", training_metrics)
+            logger.info("")
+            logger.info("Validation Metrics: %s", validation_metrics)
+            logger.info("")
+            logger.info("Testing Metrics: %s", testing_metrics)
+            logger.info("")
+            logger.info("Expert Metrics: %s", expert_metrics)
+            logger.info("")
 
             val_f1 = validation_metrics["f1"]
 
@@ -556,18 +531,23 @@ def main():
                 patience_counter = 0
                 # Save the model’s state dict (or full model) as the best so far
                 torch.save(model.state_dict(), f"model_checkpoints/best_model_({args.retrieval_method})_{args.training_label}_{args.valid_label}_{args.testing_label}.pt")
-                print(f"▶ New best model (val F1 = {val_f1:.4f}), saving to best_model.pt")
+                logger.info("▶ New best model (val F1 = %.4f), saving to best_model.pt", val_f1)
             else:
                 patience_counter += 1
-                print(f"No improvement in val F1 for {patience_counter}/{patience} epochs")
+                logger.info("No improvement in val F1 for %d/%d epochs", patience_counter, patience)
                 if patience_counter >= patience:
-                    print(f"⏹ Early stopping (no improvement for {patience} epochs).")
+                    logger.info("⏹ Early stopping (no improvement for %d epochs).", patience)
                     return
 
-            print(f"Epoch {epoch_number} complete — best val F1: {best_val_f1:.4f}\n")
-            print("\n\n\n")
+            logger.info("Epoch %d complete — best val F1: %.4f", epoch + 1, best_val_f1)
+            logger.info("")
 
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
     main()
