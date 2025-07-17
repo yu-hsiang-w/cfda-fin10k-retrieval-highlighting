@@ -1,21 +1,26 @@
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-from transformers import BertModel, AutoTokenizer, AutoModel, BertForTokenClassification
-import random
-import os
-import json
 import argparse
-import numpy as np
-import pickle
+import json
 import logging
+import os
+import pickle
+import random
 import warnings
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModel, AutoTokenizer, BertForTokenClassification
+
 from fin_rag.train_diff_agg import compute_metrics
 
-# Suppress specific warnings using the warnings module
-warnings.filterwarnings('ignore', message="Some weights of .* were not initialized from the model checkpoint")
+logger = logging.getLogger(__name__)
 
-# Set up logging to suppress all warnings and only show errors
+warnings.filterwarnings(
+    'ignore',
+    message="Some weights of .* were not initialized from the model checkpoint"
+)
+
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 random.seed(42)
@@ -382,7 +387,7 @@ def main():
             expert_annotated_results.append(id_text_label)
 
     # Load paragraph information
-    with open('para_info/para_info_contriever_firm.pkl', 'rb') as f:
+    with open('paragraph_encodings/para_info_contriever_firm.pkl', 'rb') as f:
         para_info = pickle.load(f)
 
 
@@ -422,8 +427,6 @@ def main():
         count = 0
         for training_element in training_annotated_results:
             
-            #if count % 100 == 0:
-                #print(count)
             count += 1
 
             query_firm_name = cik_to_name[training_element[0].split('_')[2]]
@@ -544,15 +547,15 @@ def main():
         testing_metrics = evaluate_dataset(testing_annotated_results, model, retriever, tokenizer1, tokenizer2, all_doc_embeddings, cik_to_name, final_texts, args, device)
         expert_metrics = evaluate_dataset(expert_annotated_results, model, retriever, tokenizer1, tokenizer2, all_doc_embeddings, cik_to_name, final_texts, args, device)
 
-        print(f"Train for {epoch + 1} epochs:")
-        print("Training Metrics:", training_metrics)
-        print()
-        print("Validation Metrics:", validation_metrics)
-        print()
-        print("Testing Metrics:", testing_metrics)
-        print()
-        print("Expert Metrics:", expert_metrics)
-        print()
+        logger.info("Train for %d epochs:", epoch + 1)
+        logger.info("Training Metrics: %s", training_metrics)
+        logger.info("")
+        logger.info("Validation Metrics: %s", validation_metrics)
+        logger.info("")
+        logger.info("Testing Metrics: %s", testing_metrics)
+        logger.info("")
+        logger.info("Expert Metrics: %s", expert_metrics)
+        logger.info("")
 
         val_f1 = validation_metrics["f1"]
 
@@ -562,18 +565,23 @@ def main():
             patience_counter = 0
             # Save the model’s state dict (or full model) as the best so far
             torch.save(model.state_dict(), f"model_checkpoints/best_model_(End_to_End)_{args.top_k}_{args.training_label}_{args.valid_label}_{args.testing_label}.pt")
-            print(f"▶ New best model (val F1 = {val_f1:.4f}), saving to best_model.pt")
+            logger.info("▶ New best model (val F1 = %.4f), saving to best_model.pt", val_f1)
         else:
             patience_counter += 1
-            print(f"No improvement in val F1 for {patience_counter}/{patience} epochs")
+            logger.info("No improvement in val F1 for %d/%d epochs", patience_counter, patience)
             if patience_counter >= patience:
-                print(f"⏹ Early stopping (no improvement for {patience} epochs).")
+                logger.info("⏹ Early stopping (no improvement for %d epochs).", patience)
                 return
 
-        print(f"Epoch {epoch + 1} complete — best val F1: {best_val_f1:.4f}\n")
-        print("\n\n\n")
+        logger.info("Epoch %d complete — best val F1: %.4f", epoch + 1, best_val_f1)
+        logger.info("")
 
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
     main()
