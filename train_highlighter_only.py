@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer, BertForTokenClassification
+from transformers import AutoModel, AutoTokenizer, BertForTokenClassification, LongformerTokenizerFast, LongformerForTokenClassification
 
 from fin_rag.train_diff_agg import compute_metrics
 
@@ -107,14 +107,24 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
         similarities = torch.matmul(all_doc_embeddings, query_embedding.t()).squeeze()
         topk_values, topk_indices = torch.topk(similarities, 2)
         
-        encoded_A = tokenizer2(
-            element[2],             
-            is_split_into_words=True,
-            add_special_tokens=False,
-            truncation=True,
-            max_length=250,
-            return_tensors="pt",
-        )
+        if args.highlighter_model == 'bert_base':
+            encoded_A = tokenizer2(
+                element[2],             
+                is_split_into_words=True,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=250,
+                return_tensors="pt",
+            )
+        elif args.highlighter_model == 'longformer':
+            encoded_A = tokenizer2(
+                element[2],             
+                is_split_into_words=True,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=1024,
+                return_tensors="pt",
+            )
 
         input_ids_A = encoded_A["input_ids"].to(device)
         attention_mask_A = encoded_A["attention_mask"].to(device)
@@ -142,13 +152,22 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
             text_B = final_texts[
                 topk_indices[1].item()
             ]
-            encoded_B = tokenizer2(
-                text_B,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=250,
-                return_tensors="pt",
-            )
+            if args.highlighter_model == 'bert_base':
+                encoded_B = tokenizer2(
+                    text_B,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=250,
+                    return_tensors="pt",
+                )
+            elif args.highlighter_model == 'longformer':
+                encoded_B = tokenizer2(
+                    text_B,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=1024,
+                    return_tensors="pt",
+                )
             input_ids_B = encoded_B["input_ids"].to(device)    
             attention_mask_B   = encoded_B["attention_mask"].to(device)
 
@@ -193,6 +212,8 @@ def evaluate_dataset(annotated_results, model, retriever, tokenizer1, tokenizer2
 def main():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('--highlighter_model', type=str, default='bert_base', choices=['bert_base', 'longformer'])
+    parser.add_argument('--retriever_model', type=str, default='contriever', choices=['contriever'])
     parser.add_argument('--lr', type=float, default=2e-5)
     parser.add_argument('--epochs_range', type=int, default=25)
     parser.add_argument('--retrieval_method', type=str, default='top_1', choices=['top_1', 'top_3', 'None'])
@@ -366,12 +387,18 @@ def main():
 
     # Initialize tokenizer and retriever model
     tokenizer1 = AutoTokenizer.from_pretrained('facebook/contriever')
-    tokenizer2 = AutoTokenizer.from_pretrained('bert-base-uncased')
+    if args.highlighter_model == 'bert_base':
+        tokenizer2 = AutoTokenizer.from_pretrained('bert-base-uncased')
+    elif args.highlighter_model == 'longformer':
+        tokenizer2 = LongformerTokenizerFast.from_pretrained('allenai/longformer-base-4096', add_prefix_space=True)
     retriever = AutoModel.from_pretrained('facebook/contriever')
     retriever.to(device).eval()
 
     # Initialize classification model
-    model = BertForTokenClassification.from_pretrained('bert-base-uncased', num_labels=2).to(device).train()
+    if args.highlighter_model == 'bert_base':
+        model = BertForTokenClassification.from_pretrained('bert-base-uncased', num_labels=2).to(device).train()
+    elif args.highlighter_model == 'longformer':
+        model = LongformerForTokenClassification.from_pretrained('allenai/longformer-base-4096', num_labels=2).to(device).train()
 
     # Setup optimizer and loss criterion
     optimizer = torch.optim.Adam(
@@ -416,14 +443,24 @@ def main():
                 topk_values, topk_indices = torch.topk(similarities, 6)
                 
                 # Tokenize training element
-                encoded_A = tokenizer2(
-                    training_element[2],             
-                    is_split_into_words=True,        
-                    add_special_tokens=False,         
-                    truncation=True,
-                    max_length=250,
-                    return_tensors="pt",
-                )
+                if args.highlighter_model == 'bert_base':
+                    encoded_A = tokenizer2(
+                        training_element[2],              # e.g. ["This","is","a","sentence"]
+                        is_split_into_words=True,         # <-- very important
+                        add_special_tokens=False,         # we’ll add SEP manually
+                        truncation=True,
+                        max_length=250,
+                        return_tensors="pt",
+                    )
+                elif args.highlighter_model == 'longformer':
+                    encoded_A = tokenizer2(
+                        training_element[2],              # e.g. ["This","is","a","sentence"]
+                        is_split_into_words=True,         # <-- very important
+                        add_special_tokens=False,         # we’ll add SEP manually
+                        truncation=True,
+                        max_length=1024,
+                        return_tensors="pt",
+                    )
 
                 input_ids_A = encoded_A["input_ids"].to(device)         # [1, seq_len_A]
                 attention_mask_A = encoded_A["attention_mask"].to(device)
@@ -453,13 +490,22 @@ def main():
                         topk_indices[1].item() if args.retrieval_method=='top_1'
                         else topk_indices[k+1].item()
                     ]
-                    encoded_B = tokenizer2(
-                        text_B,
-                        add_special_tokens=False,
-                        truncation=True,
-                        max_length=250,
-                        return_tensors="pt",
-                    )
+                    if args.highlighter_model == 'bert_base':
+                        encoded_B = tokenizer2(
+                            text_B,
+                            add_special_tokens=False,
+                            truncation=True,
+                            max_length=250,
+                            return_tensors="pt",
+                        )
+                    elif args.highlighter_model == 'longformer':
+                        encoded_B = tokenizer2(
+                            text_B,
+                            add_special_tokens=False,
+                            truncation=True,
+                            max_length=1024,
+                            return_tensors="pt",
+                        )
                     input_ids_B = encoded_B["input_ids"].to(device)      
                     attention_mask_B   = encoded_B["attention_mask"].to(device)
 
@@ -530,7 +576,7 @@ def main():
                 best_val_f1      = val_f1
                 patience_counter = 0
                 # Save the model’s state dict (or full model) as the best so far
-                torch.save(model.state_dict(), f"model_checkpoints/best_model_({args.retrieval_method})_{args.training_label}_{args.valid_label}_{args.testing_label}.pt")
+                torch.save(model.state_dict(), f"model_checkpoints/best_model_({args.highlighter_model}, {args.retriever_model})_({args.retrieval_method})_{args.training_label}_{args.valid_label}_{args.testing_label}.pt")
                 logger.info("▶ New best model (val F1 = %.4f), saving to best_model.pt", val_f1)
             else:
                 patience_counter += 1
